@@ -1,0 +1,1 @@
+# Concatenated-HOG-CNN-Feature-Representation-for-Automated-Osteoporosis-Detection-from-Hip-X-rays
