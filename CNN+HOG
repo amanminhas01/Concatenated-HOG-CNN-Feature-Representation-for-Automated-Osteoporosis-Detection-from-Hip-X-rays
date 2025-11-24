@@ -1,0 +1,66 @@
+import torch
+import torch.nn as nn
+from torchvision import models
+from skimage.feature import hog
+from skimage.color import rgb2gray
+import numpy as np
+
+
+class CNNHOGFusion(nn.Module):
+    def __init__(self, num_classes=2, fine_tune=True, hog_dim=2700):
+        super(CNNHOGFusion, self).__init__()
+
+        # Load ResNet-50 backbone
+        resnet = models.resnet101(weights='DEFAULT')
+        self.cnn = nn.Sequential(*list(resnet.children())[:-2])  # keep conv layers only
+
+        if fine_tune:
+            print('[INFO]: Fine-tuning all ResNet-50 layers...')
+            for param in self.cnn.parameters():
+                param.requires_grad = True
+        else:
+            for param in self.cnn.parameters():
+                param.requires_grad = False
+
+        # Global pooling to reduce CNN output to fixed shape
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.cnn_output_dim = 2048 # ResNet-50 final conv output channels 2048 & 512
+
+        # Fusion classifier
+        fusion_dim = self.cnn_output_dim + hog_dim
+        self.classifier = nn.Sequential(
+            nn.Linear(fusion_dim, 512),
+            nn.BatchNorm1d(512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+
+            nn.Linear(512, 128),
+            nn.BatchNorm1d(128),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+
+            nn.Linear(128, num_classes)
+        )
+
+    def forward(self, x):
+        # CNN path
+        cnn_feat = self.cnn(x)                # (B, 2048, H', W')
+        cnn_feat = self.global_pool(cnn_feat) # (B, 2048, 1, 1)
+        cnn_feat = cnn_feat.view(x.size(0), -1)  # (B, 2048)
+
+        # HOG path
+        hog_feats = []
+        for img in x:
+            img_np = img.permute(1, 2, 0).cpu().numpy()  # (H, W, C)
+            gray_img = rgb2gray(img_np)                 
+            hog_feat = hog(gray_img, orientations=3, pixels_per_cell=(32, 32),
+                           cells_per_block=(2, 2), feature_vector=True)
+            hog_feats.append(hog_feat)
+
+        hog_feats = np.array(hog_feats)
+        hog_feats = torch.from_numpy(hog_feats).float().to(x.device)  # (B, hog_dim)
+
+        # Fusion
+        fused = torch.cat((cnn_feat, hog_feats), dim=1)  # (B, 2048 + hog_dim)
+
+        return self.classifier(fused)
